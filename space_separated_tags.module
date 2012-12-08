@@ -1,0 +1,153 @@
+<?php
+/**
+ * @file
+ * Space separated tags widget
+ */
+
+/**
+ * Implements hook_menu().
+ */
+function space_separated_tags_menu() {
+
+  $items['space_separated_tags_taxonomy/autocomplete'] = array(
+    'title' => 'Autocomplete taxonomy',
+    'page callback' => 'space_separated_tags_taxonomy_autocomplete',
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+    'file' => 'space_separated_tags.pages.inc',
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_field_widget_info().
+ */
+function space_separated_tags_field_widget_info() {
+  return array(
+    'space_separated_tags_taxonomy' => array(
+      'label' => t('Autocomplete term widget (tagging, space-separated)'),
+      'field types' => array('taxonomy_term_reference'),
+      'settings' => array(
+        'size' => 60,
+        'autocomplete_path' => 'space_separated_tags_taxonomy/autocomplete',
+      ),
+      'behaviors' => array(
+        'multiple values' => FIELD_BEHAVIOR_CUSTOM,
+      ),
+    ),
+  );
+}
+
+/**
+ * Implements hook_field_widget_form().
+ */
+function space_separated_tags_field_widget_form(&$form, &$form_state, $field, $instance, $langcode, $items, $delta, $element) {
+  $tags = array();
+  foreach ($items as $item) {
+    $tags[$item['tid']] = isset($item['taxonomy_term']) ? $item['taxonomy_term'] : taxonomy_term_load($item['tid']);
+  }
+
+  $element += array(
+    '#type' => 'textfield',
+    '#default_value' => space_separated_tags_taxonomy_implode_tags($tags),
+    '#autocomplete_path' => $instance['widget']['settings']['autocomplete_path'] . '/' . $field['field_name'],
+    '#size' => $instance['widget']['settings']['size'],
+    '#maxlength' => 1024,
+    '#element_validate' => array('space_separated_tags_autocomplete_validate'),
+  );
+
+  return $element;
+}
+
+/**
+ * Form element validate handler for taxonomy term autocomplete element.
+ */
+function space_separated_tags_autocomplete_validate($element, &$form_state) {
+  // Autocomplete widgets do not send their tids in the form, so we must detect
+  // them here and process them independently.
+  $value = array();
+  if ($tags = $element['#value']) {
+    // Collect candidate vocabularies.
+    $field = field_widget_field($element, $form_state);
+    $vocabularies = array();
+    foreach ($field['settings']['allowed_values'] as $tree) {
+      if ($vocabulary = taxonomy_vocabulary_machine_name_load($tree['vocabulary'])) {
+        $vocabularies[$vocabulary->vid] = $vocabulary;
+      }
+    }
+
+    // Translate term names into actual terms.
+    $typed_terms = space_separated_tags_explode_tags($tags);
+    foreach ($typed_terms as $typed_term) {
+      // See if the term exists in the chosen vocabulary and return the tid;
+      // otherwise, create a new 'autocreate' term for insert/update.
+      if ($possibilities = taxonomy_term_load_multiple(array(), array(
+        'name' => trim($typed_term),
+        'vid' => array_keys($vocabularies)
+      ))
+      ) {
+        $term = array_pop($possibilities);
+      }
+      else {
+        $vocabulary = reset($vocabularies);
+        $term = array(
+          'tid' => 'autocreate',
+          'vid' => $vocabulary->vid,
+          'name' => $typed_term,
+          'vocabulary_machine_name' => $vocabulary->machine_name,
+        );
+      }
+      $value[] = (array) $term;
+    }
+  }
+
+  form_set_value($element, $value, $form_state);
+}
+
+/**
+ * Implodes a list of tags of a certain vocabulary into a string.
+ */
+function space_separated_tags_taxonomy_implode_tags($tags, $vid = NULL) {
+  $typed_tags = array();
+  foreach ($tags as $tag) {
+    // Extract terms belonging to the vocabulary in question.
+    if (!isset($vid) || $tag->vid == $vid) {
+      // Make sure we have a completed loaded taxonomy term.
+      if (isset($tag->name)) {
+        // Commas and quotes in tag names are special cases, so encode 'em.
+        if (strpos($tag->name, ',') !== FALSE || strpos($tag->name, '"') !== FALSE) {
+          $typed_tags[] = '"' . str_replace('"', '""', $tag->name) . '"';
+        }
+        else {
+          $typed_tags[] = $tag->name;
+        }
+      }
+    }
+  }
+  return implode(' ', $typed_tags);
+}
+
+/**
+ * Explodes a string of tags into an array.
+ */
+function space_separated_tags_explode_tags($tags) {
+  // This regexp allows the following types of user input:
+  // this, "somecompany, llc", "and ""this"" w,o.rks", foo bar
+  $regexp = '%(?:^|\s+|,\ *)("(?>[^"]*)(?>""[^"]* )*"|(?: [^"\s+|,]*))%x';
+  preg_match_all($regexp, $tags, $matches);
+  $typed_tags = array_unique($matches[1]);
+
+  $tags = array();
+  foreach ($typed_tags as $tag) {
+    // If a user has escaped a term (to demonstrate that it is a group,
+    // or includes a comma or quote character), we remove the escape
+    // formatting so to save the term into the database as the user intends.
+    $tag = trim(str_replace('""', '"', preg_replace('/^"(.*)"$/', '\1', $tag)));
+    if ($tag != "") {
+      $tags[] = $tag;
+    }
+  }
+
+  return $tags;
+}
